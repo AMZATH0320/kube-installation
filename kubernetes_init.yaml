@@ -1,0 +1,131 @@
+---
+- name: Kubernetes Cluster Setup
+  hosts: all  # This includes both master and worker nodes
+
+  tasks:
+    # Enable IPv4 forwarding and load required modules
+    - name: Enable IPv4 forwarding and modules
+      command: |
+        sudo modprobe overlay br_netfilter
+        echo 1 > /proc/sys/net/bridge/bridge-nf-call-iptables
+        echo 1 > /proc/sys/net/bridge/bridge-nf-call-ip6tables
+        echo 1 > /proc/sys/net/ipv4/ip_forward
+
+    # Update package lists
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+      become: yes 
+
+    # Install required dependencies
+    - name: Install dependencies
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - lsb-release
+      become: yes
+
+    # Add containerd repository
+    - name: Add containerd repository key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+      become: yes
+
+    - name: Add containerd repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+        state: present
+      become: yes
+
+    # Install and configure containerd
+    - name: Install containerd
+      apt:
+        name: containerd.io
+        state: present
+      become: yes
+
+    - name: Start and enable containerd service
+      systemd:
+        name: containerd
+        state: started
+        enabled: yes
+      become: yes
+
+    - name: Configure containerd
+      copy:
+        content: |
+          version = 2
+          [plugins]
+            [plugins."io.containerd.grpc.v1.cri"]
+              [plugins."io.containerd.grpc.v1.cri".containerd]
+                [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
+                  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+                    runtime_type = "io.containerd.runc.v2"
+                    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc.options]
+                      SystemdCgroup = true
+        dest: /etc/containerd/config.toml
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: Restart containerd service
+      systemd:
+        name: containerd
+        state: restarted
+      become: yes
+
+    # Install Kubernetes components
+    - name: Update apt cache again
+      apt:
+        update_cache: yes
+      become: yes
+
+    - name: Create keyring directory if not exists
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+      become: yes
+
+    - name: Add Kubernetes GPG key
+      command: curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Add Kubernetes repository
+      command: echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+    - name: Update apt cache again
+      apt:
+        update_cache: yes
+      become: yes
+
+    - name: Install kubelet, kubeadm, and kubectl
+      apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+
+    # Initialize cluster on the master node (separate task)
+    - name: Initialize Kubernetes cluster (on master only)
+      hosts: [master-node] # Run only on master
+      tasks:
+        - name: Initialize kubeadm
+          command: |
+            kubeadm init
+            mkdir -p $HOME/.kube
+            sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+            sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+        - name: Installing Networking solution
+          command: kubectl apply -f https://github.com/weaveworks/weave/releases/download/v2.8.1/weave-daemonset-k8s.yaml
+
+
+        # Instructions to join worker nodes are printed by kubeadm init
+        # - name: Get join command for worker nodes
+        #   register: join_command
+        #   command: kubeadm token create --print-join
+
+    
